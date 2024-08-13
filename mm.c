@@ -49,8 +49,13 @@ team_t team = {
 #define PUT(p, val) (*(unsigned int *)(p) = (val))
 
 // 특정 주소 p에 해당하는 블록의 사이즈와 가용 여부를 확인함
-#define GET_SIZE(p) ((GET(p) >> 1) << 1)
+#define GET_SIZE(p) ((GET(p) >> 3) << 3)
+#define GET_SIZE_ALLOC(p) ((GET(p) >> 1) << 1)
 #define GET_ALLOC(p) (GET(p) & 0x1)
+
+#define GET_PREV_ALLOC(p) (GET(HDRP(p)) & 0x2)
+#define ALLOC_PREV_HDRP(p) (GET(HDRP(p)) |= 0x2)
+#define FREE_PREV_HDRP(p) (GET(HDRP(p)) &= ~0x2)
 
 // 특정 주소 p에 해당하는 블록의 헤더와 풋터의 포인터 주소를 읽어온다
 #define HDRP(ptr) ((char *)(ptr)-WSIZE)
@@ -88,7 +93,7 @@ int mm_init(void)
     PUT(heap_listp, 0);                            // Alignment padding
     PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // Prologue header
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // Prologue footer
-    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));     // Epilogue header
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 3));     // Epilogue header
     heap_listp += (2 * WSIZE);
 
     // 힙 영역을 확장하는 함수. 
@@ -121,13 +126,13 @@ void *mm_malloc(size_t size)
     /* examle)
        만약 payload에 넣으려고하는 데이터가 2byte라면 header(4byte) + footer(4byte) + payload(2byte) = 10byte 이지만, 더블워드 정렬 조건을 충족시키기 위해서 패딩 6byte를 추가해야한다. 따라서 총 16byte의 블록이 만들어지는데 이 과정을 계산하는 식이 아래 식이다.
    */
-    if (size <= DSIZE)
+    if (size <= WSIZE)
     {
-        asize = 2 * DSIZE; // 헤더 4byte, 풋터 4byte + 그리고 나머지 8byte가 데이터 들어올 공간임
+        asize = DSIZE; // 헤더 4byte, 풋터 4byte + 그리고 나머지 8byte가 데이터 들어올 공간임
     }
     else
     {
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+        asize = DSIZE * ((size-WSIZE + (DSIZE) + (DSIZE - 1)) / DSIZE);
     }
 
     // 가용 블록을 가용리스트에서 검색하고 할당기는 요청한 블록을 배치한다.
@@ -151,20 +156,26 @@ static void place(void *ptr, size_t asize)
     size_t csize = GET_SIZE(HDRP(ptr));
 
     // 블록 내의 할당 부분를 제외한 나머지 공간의 크기가 더블 워드 이상이라면, 해당 블록의 공간을 분할한다.
-    if ((csize - asize) >= (2 * DSIZE))
+    if ((csize - asize) >= (DSIZE))
     {
+        size_t prevAlloc = GET_PREV_ALLOC(ptr);
         PUT(HDRP(ptr), PACK(asize, 1));
-        PUT(FTRP(ptr), PACK(asize, 1));
+        if(prevAlloc) ALLOC_PREV_HDRP(ptr);
+
+
         ptr = NEXT_BLKP(ptr);
-        PUT(HDRP(ptr), PACK(csize - asize, 0));
+        PUT(HDRP(ptr), PACK(csize - asize, 2));
         PUT(FTRP(ptr), PACK(csize - asize, 0));
     }
     // 블록 내의 할당 부분을 제외한 나머지 공간의 크기가 2 * 더블 워드(8byte)보다 작을 경우에는, 그냥 해당 블록의 크기를 그대로 사용한다
     else 
     {
-        
+        size_t prevAlloc = GET_PREV_ALLOC(ptr);
         PUT(HDRP(ptr), PACK(csize, 1));
-        PUT(FTRP(ptr), PACK(csize, 1));
+        if(prevAlloc) ALLOC_PREV_HDRP(ptr);
+
+        // PUT(FTRP(ptr), PACK(csize, 1));
+        ALLOC_PREV_HDRP(NEXT_BLKP(ptr));
     }
 }
 //first fit
@@ -193,7 +204,11 @@ static void *extend_heap(size_t words)
         return NULL;
 
     /* 할당되지 않은 free 상태인 블록의 헤더/풋터와 에필로그 헤더를 초기화한다 */
-    PUT(HDRP(ptr), PACK(size, 0));         // free 블록의 header
+    
+    size_t prevAlloc = GET_PREV_ALLOC(ptr);
+    PUT(HDRP(ptr), PACK(size, 0));
+    if(prevAlloc) ALLOC_PREV_HDRP(ptr);
+
     PUT(FTRP(ptr), PACK(size, 0));         // free 블록의 footer
     PUT(HDRP(NEXT_BLKP(ptr)), PACK(0, 1)); // new epilogue header
 
@@ -207,15 +222,24 @@ void mm_free(void *ptr)
 {
     size_t size = GET_SIZE(HDRP(ptr));
 
+    //내 다음 블록에 가용여부 갱신
+    FREE_PREV_HDRP(NEXT_BLKP(ptr));
+
+    //기존의 가용여부 체크해서 갱신
+    size_t prevAlloc = GET_PREV_ALLOC(ptr);
     PUT(HDRP(ptr), PACK(size, 0));
+    if(prevAlloc) ALLOC_PREV_HDRP(ptr);
+
     PUT(FTRP(ptr), PACK(size, 0));
+
     coalesce(ptr);
 }
 
 // 할당된 블록을 합칠 수 있는 경우 4가지에 따라 메모리 연결
 static void *coalesce(void *ptr)
 {
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(ptr))); // 이전 블록의 할당 여부
+    //size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(ptr))); // 이전 블록의 할당 여부
+    size_t prev_alloc = GET_PREV_ALLOC(ptr); // 이전 블록의 할당 여부
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr))); // 다음 블록의 할당 여부
     size_t size = GET_SIZE(HDRP(ptr));                   // 현재 블록의 사이즈
 
@@ -228,7 +252,7 @@ static void *coalesce(void *ptr)
     else if (prev_alloc && !next_alloc)
     {
         size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-        PUT(HDRP(ptr), PACK(size, 0));
+        PUT(HDRP(ptr), PACK(size, 2));
         PUT(FTRP(ptr), PACK(size, 0));
     }
     // 다음 블록이 이미 할당 되어 있고, 이전 블록이 free 라면
@@ -236,14 +260,14 @@ static void *coalesce(void *ptr)
     {
         size += GET_SIZE(HDRP(PREV_BLKP(ptr)));
         PUT(FTRP(ptr), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 2));
         ptr = PREV_BLKP(ptr);
     }
     // 이전과 다음 블록이 모두 free일 경우
     else 
     {
         size += GET_SIZE(HDRP(PREV_BLKP(ptr))) + GET_SIZE(FTRP(NEXT_BLKP(ptr)));
-        PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 2));
         PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
         ptr = PREV_BLKP(ptr);
     }
@@ -275,4 +299,3 @@ void *mm_realloc(void *ptr, size_t size)
     mm_free(ptr); // 기존 ptr의 메모리는 할당 해제해줌
     return new_ptr;
 }
-
