@@ -50,7 +50,6 @@ team_t team = {
 
 // 특정 주소 p에 해당하는 블록의 사이즈와 가용 여부를 확인함
 #define GET_SIZE(p) ((GET(p) >> 3) << 3)
-#define GET_SIZE_ALLOC(p) ((GET(p) >> 1) << 1)
 #define GET_ALLOC(p) (GET(p) & 0x1)
 
 #define GET_PREV_ALLOC(p) (GET(HDRP(p)) & 0x2)
@@ -67,6 +66,7 @@ team_t team = {
 
 // 전역 변수 및 함수 선언
 static void *heap_listp;
+static void *lastPoint;
 static void *extend_heap(size_t words);
 static void *coalesce(void *ptr);
 static void *find_fit(size_t asize);
@@ -95,7 +95,9 @@ int mm_init(void)
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // Prologue footer
     PUT(heap_listp + (3 * WSIZE), PACK(0, 3));     // Epilogue header
     heap_listp += (2 * WSIZE);
+    lastPoint = heap_listp;
 
+    extend_heap(4);
     // 힙 영역을 확장하는 함수. 
     // 두 가지 경우에 호출된다.
     // (1) 힙이 초기화 될때 (2) mm_malloc이 적당한 맞춤fit을 찾지 못했을 때
@@ -123,22 +125,14 @@ void *mm_malloc(size_t size)
     {
         return NULL;
     }
-    /* examle)
-       만약 payload에 넣으려고하는 데이터가 2byte라면 header(4byte) + footer(4byte) + payload(2byte) = 10byte 이지만, 더블워드 정렬 조건을 충족시키기 위해서 패딩 6byte를 추가해야한다. 따라서 총 16byte의 블록이 만들어지는데 이 과정을 계산하는 식이 아래 식이다.
-   */
-    if (size <= WSIZE)
-    {
-        asize = DSIZE; // 헤더 4byte, 풋터 4byte + 그리고 나머지 8byte가 데이터 들어올 공간임
-    }
-    else
-    {
-        asize = DSIZE * ((size-WSIZE + (DSIZE) + (DSIZE - 1)) / DSIZE);
-    }
+    // 12 - 4 + 8 + 7 = 23 2
+    asize = DSIZE * ((size + (WSIZE) + (DSIZE - 1)) / DSIZE);
 
     // 가용 블록을 가용리스트에서 검색하고 할당기는 요청한 블록을 배치한다.
     if ((ptr = find_fit(asize)) != NULL)
     {
         place(ptr, asize);
+        lastPoint = ptr;
         return ptr;
     }
 
@@ -184,7 +178,7 @@ static void *find_fit(size_t asize)
     void *ptr;
 
     // 에필로그 헤더(힙의 끝) 까지 탐색한다
-    for (ptr = heap_listp; GET_SIZE(HDRP(ptr)) > 0; ptr = NEXT_BLKP(ptr))
+    for (ptr = lastPoint; GET_SIZE(HDRP(ptr)) > 0; ptr = NEXT_BLKP(ptr))
     {
         // 할당 X and 여유 공간의 크기가 할당 할 크기보다 넉넉할 경우에만
         if (!GET_ALLOC(HDRP(ptr)) && (asize <= GET_SIZE(HDRP(ptr))))
@@ -271,6 +265,7 @@ static void *coalesce(void *ptr)
         PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
         ptr = PREV_BLKP(ptr);
     }
+    lastPoint = ptr;
     return ptr;
 }
 /*
