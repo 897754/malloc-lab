@@ -13,11 +13,11 @@
  ********************************************************/
 team_t team = {
     /* Team name */
-    "ateam",
+    "BJH",
     /* First member's full name */
-    "Harry Bovik",
+    "Jihun Bae",
     /* First member's email address */
-    "bovik@cs.cmu.edu",
+    "897753@gmail.com",
     /* Second member's full name (leave blank if none) */
     "",
     /* Second member's email address (leave blank if none) */
@@ -46,11 +46,14 @@ team_t team = {
 
 // 특정 주소 p에 워드 읽기/쓰기 함수
 #define GET(p) (*(unsigned int *)(p))
-#define PUT(p, val) (*(unsigned int *)(p) = (val))
+#define PUT(p, val) (*(unsigned int *)(p) = (unsigned int)(val))
 
 // 특정 주소 p에 해당하는 블록의 사이즈와 가용 여부를 확인함
 #define GET_SIZE(p) ((GET(p) >> 3) << 3)
 #define GET_ALLOC(p) (GET(p) & 0x1)
+
+#define GET_PRED(p) ((unsigned int*)GET(p))
+#define GET_SUCC(p) ((unsigned int*)GET(p+WSIZE))
 
 #define GET_PREV_ALLOC(p) (GET(HDRP(p)) & 0x2)
 #define ALLOC_PREV_HDRP(p) (GET(HDRP(p)) |= 0x2)
@@ -91,13 +94,20 @@ int mm_init(void)
     };
 
     PUT(heap_listp, 0);                            // Alignment padding
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1)); // Prologue header
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1)); // Prologue footer
-    PUT(heap_listp + (3 * WSIZE), PACK(0, 3));     // Epilogue header
+    PUT(heap_listp + (1 * WSIZE), PACK(2*DSIZE, 1)); // Prologue header
+    PUT(heap_listp + (4 * WSIZE), PACK(2*DSIZE, 1)); // Prologue footer
+    PUT(heap_listp + (5 * WSIZE), PACK(0, 3));     // Epilogue header
     heap_listp += (2 * WSIZE);
     lastPoint = heap_listp;
 
+    PUT(heap_listp, 0);    //프롤로그 블록 전임자
+    PUT(heap_listp + (1 * WSIZE), (heap_listp+DSIZE));    //프롤로그 블록 후임자
+
+
+    //CheatKey
     extend_heap(4);
+
+
     // 힙 영역을 확장하는 함수. 
     // 두 가지 경우에 호출된다.
     // (1) 힙이 초기화 될때 (2) mm_malloc이 적당한 맞춤fit을 찾지 못했을 때
@@ -126,7 +136,14 @@ void *mm_malloc(size_t size)
         return NULL;
     }
     // 12 - 4 + 8 + 7 = 23 2
-    asize = DSIZE * ((size + (WSIZE) + (DSIZE - 1)) / DSIZE);
+    if(size <= WSIZE)
+    {
+        asize = 2*DSIZE;
+    }
+    else
+    {
+        asize = DSIZE * ((size + (WSIZE) + (DSIZE - 1)) / DSIZE);
+    }
 
     // 가용 블록을 가용리스트에서 검색하고 할당기는 요청한 블록을 배치한다.
     if ((ptr = find_fit(asize)) != NULL)
@@ -148,18 +165,30 @@ void *mm_malloc(size_t size)
 static void place(void *ptr, size_t asize)
 {
     size_t csize = GET_SIZE(HDRP(ptr));
+    void* predPtr = GET_PRED(ptr); 
+    void* succPtr = GET_SUCC(ptr);
 
-    // 블록 내의 할당 부분를 제외한 나머지 공간의 크기가 더블 워드 이상이라면, 해당 블록의 공간을 분할한다.
-    if ((csize - asize) >= (DSIZE))
+    // 블록 내의 할당 부분를 제외한 나머지 공간의 크기가 2 * 더블 워드 이상이라면, 해당 블록의 공간을 분할한다.
+    if ((csize - asize) >= 2*(DSIZE))
     {
         size_t prevAlloc = GET_PREV_ALLOC(ptr);
         PUT(HDRP(ptr), PACK(asize, 1));
         if(prevAlloc) ALLOC_PREV_HDRP(ptr);
 
-
+        
+        // 가용블럭 생성
         ptr = NEXT_BLKP(ptr);
-        PUT(HDRP(ptr), PACK(csize - asize, 2));
-        PUT(FTRP(ptr), PACK(csize - asize, 0));
+        PUT(HDRP(ptr), PACK(csize - asize, 2)); //헤더
+
+
+        PUT(ptr, predPtr);              // 전임자
+        PUT(predPtr + WSIZE, ptr);
+        
+        PUT((ptr + WSIZE), succPtr);    // 후임자
+        PUT(succPtr, ptr);
+
+
+        PUT(FTRP(ptr), PACK(csize - asize, 0)); //풋터
     }
     // 블록 내의 할당 부분을 제외한 나머지 공간의 크기가 2 * 더블 워드(8byte)보다 작을 경우에는, 그냥 해당 블록의 크기를 그대로 사용한다
     else 
@@ -167,6 +196,10 @@ static void place(void *ptr, size_t asize)
         size_t prevAlloc = GET_PREV_ALLOC(ptr);
         PUT(HDRP(ptr), PACK(csize, 1));
         if(prevAlloc) ALLOC_PREV_HDRP(ptr);
+
+        // 양 옆의 가용블럭 리스트 갱신
+        PUT((predPtr + WSIZE), succPtr);
+        PUT(succPtr, predPtr);
 
         // PUT(FTRP(ptr), PACK(csize, 1));
         ALLOC_PREV_HDRP(NEXT_BLKP(ptr));
@@ -178,7 +211,7 @@ static void *find_fit(size_t asize)
     void *ptr;
 
     // 에필로그 헤더(힙의 끝) 까지 탐색한다
-    for (ptr = lastPoint; GET_SIZE(HDRP(ptr)) > 0; ptr = NEXT_BLKP(ptr))
+    for (ptr = lastPoint; GET_SIZE(HDRP(ptr)) > 0; ptr = GET_SUCC(ptr))
     {
         // 할당 X and 여유 공간의 크기가 할당 할 크기보다 넉넉할 경우에만
         if (!GET_ALLOC(HDRP(ptr)) && (asize <= GET_SIZE(HDRP(ptr))))
@@ -192,6 +225,8 @@ static void *extend_heap(size_t words)
 {
     char *ptr;
     size_t size;
+    
+
     /* 정렬을 유지하기 위해 짝수 개수의 워드를 할당한다 */
     size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
     if ((long)(ptr = mem_sbrk(size)) == -1)
@@ -202,6 +237,11 @@ static void *extend_heap(size_t words)
     size_t prevAlloc = GET_PREV_ALLOC(ptr);
     PUT(HDRP(ptr), PACK(size, 0));
     if(prevAlloc) ALLOC_PREV_HDRP(ptr);
+
+    PUT((ptr), heap_listp);
+    PUT((ptr + WSIZE), GET_SUCC(heap_listp));
+    PUT((heap_listp+WSIZE), ptr);
+
 
     PUT(FTRP(ptr), PACK(size, 0));         // free 블록의 footer
     PUT(HDRP(NEXT_BLKP(ptr)), PACK(0, 1)); // new epilogue header
@@ -216,6 +256,7 @@ void mm_free(void *ptr)
 {
     size_t size = GET_SIZE(HDRP(ptr));
 
+
     //내 다음 블록에 가용여부 갱신
     FREE_PREV_HDRP(NEXT_BLKP(ptr));
 
@@ -226,6 +267,13 @@ void mm_free(void *ptr)
 
     PUT(FTRP(ptr), PACK(size, 0));
 
+    //명가리 앞부분에 달아줌
+    void* succ = GET_SUCC(heap_listp);
+    PUT(succ, ptr);
+    PUT(ptr+WSIZE, succ);
+    PUT(ptr, heap_listp);
+    PUT(heap_listp + WSIZE, ptr);
+    
     coalesce(ptr);
 }
 
@@ -242,9 +290,12 @@ static void *coalesce(void *ptr)
     {
         return ptr;
     }
-    // 다음 블록이 이미 할당 되어 있고, 이전 블록이 free 라면
+    // 이전 블록이 이미 할당 되어 있고, 다음 블록이 free 라면
     else if (prev_alloc && !next_alloc)
     {
+        void* predPtr = GET_PRED(NEXT_BLKP(ptr));
+        PUT(predPtr + WSIZE, ptr);
+
         size += GET_SIZE(HDRP(NEXT_BLKP(ptr)));
         PUT(HDRP(ptr), PACK(size, 2));
         PUT(FTRP(ptr), PACK(size, 0));
@@ -260,9 +311,14 @@ static void *coalesce(void *ptr)
     // 이전과 다음 블록이 모두 free일 경우
     else 
     {
+        void* succPtr = GET_SUCC(NEXT_BLKP(ptr));
+
         size += GET_SIZE(HDRP(PREV_BLKP(ptr))) + GET_SIZE(FTRP(NEXT_BLKP(ptr)));
         PUT(HDRP(PREV_BLKP(ptr)), PACK(size, 2));
         PUT(FTRP(NEXT_BLKP(ptr)), PACK(size, 0));
+
+        PUT(ptr + WSIZE, succPtr);
+
         ptr = PREV_BLKP(ptr);
     }
     lastPoint = ptr;
